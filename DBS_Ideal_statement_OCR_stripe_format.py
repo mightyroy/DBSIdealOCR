@@ -4,23 +4,26 @@ import re
 from datetime import datetime
 import os
 
-# Short description of the program
-# This Python script extracts transaction data from a bank statement PDF and saves it as a CSV file with the same name, accurately parsing and formatting the data while handling specific layout nuances.
-
-pdf_path = '08-AUG.pdf'  # Replace with your actual PDF file path
+pdf_path = '06-JUN.pdf'  # Replace with your actual PDF file path
 
 # Generate the CSV file name by replacing the '.pdf' extension with '.csv'
 csv_filename = os.path.splitext(pdf_path)[0] + '.csv'
 
 transactions = []
 
-# Initialize totals for summary
-total_debit_transactions = 0
-total_credit_transactions = 0
-total_debit_amount = 0.0
-total_credit_amount = 0.0
+# Manually set the x-coordinate boundaries for each column
+column_boundaries = {
+    'Date': (30, 110),
+    'Value Date': (110, 190),
+    'Transaction Details': (190, 350),
+    'Debit': (350, 430),
+    'Credit': (430, 497),
+    'Running Balance': (497, 550),
+}
 
-# Function to parse amounts
+header_texts = ["Date", "Value Date", "Transaction Details", "Debit", "Credit", "Running Balance"]
+date_pattern = r'\d{2}-[A-Za-z]{3}-\d{4}'  # Adjust if your date format is different
+
 def parse_amount(amount_str):
     amount_str = amount_str.replace(',', '').replace('$', '').strip()
     # Check if the string is a valid number
@@ -29,18 +32,10 @@ def parse_amount(amount_str):
     else:
         return ''
 
-# Regular expression pattern for dates with two-digit years (e.g., '31-Oct-23')
-date_pattern = r'\d{2}-[A-Za-z]{3}-\d{2}'
-
-# Manually set the x-coordinate boundaries for each column
-column_boundaries = {
-    'Transaction Date': (45, 109),      # Replace with your x-coordinate ranges
-    'Value Date': (109, 165),
-    'Transaction Details': (165, 355),
-    'Withdrawal': (355, 440),
-    'Deposit': (440, 505),
-    'Balance': (505, 590),
-}
+total_debit_transactions = 0
+total_credit_transactions = 0
+total_debit_amount = 0.0
+total_credit_amount = 0.0
 
 with pdfplumber.open(pdf_path) as pdf:
     num_pages = len(pdf.pages)
@@ -48,38 +43,34 @@ with pdfplumber.open(pdf_path) as pdf:
         print(f"\nProcessing page {page_num + 1}...")
         words = page.extract_words(use_text_flow=True)
 
-        # Identify the footer lines
+        # Identify the header line and the footer line
+        header_found = False
         footer_y = None
-        header_y = None  # To be set when 'Transaction Date' is found
+        header_y = None
+        additional_footer_y = None  # For 'Total Debit Count :'
 
-        for idx, word in enumerate(words):
+        for word in words:
             if word['text'] == 'Printed' and footer_y is None:
                 footer_y = word['top']
-                print(f"'Printed' found. Setting footer_y to {footer_y}")
-            if page_num == num_pages - 1:
-                # Check for 'Total' as a standalone word on the last page
-                if word['text'] == 'Total' and footer_y is None:
-                    # Check if 'Total' is the only word on the line
-                    line_key = round(word['top'], 1)
-                    line_words = [w for w in words if round(w['top'], 1) == line_key]
-                    line_text = ' '.join([w['text'] for w in line_words])
-                    if line_text.strip() == 'Total':
-                        footer_y = word['top']
-                        print(f"'Total' detected as standalone word on last page. Setting footer_y to {footer_y}")
-            if word['text'] == 'Transaction' and header_y is None:
-                # Check if the next word is 'Date'
-                if idx + 1 < len(words) and words[idx + 1]['text'] == 'Date':
-                    header_y = word['top']
-                    print(f"Header found at Y-coordinate: {header_y}")
+            if (page_num == num_pages - 1) and ('Total' in word['text'] and 'Debit' in word['text'] and 'Count' in word['text']):
+                # Found the additional footer on the last page
+                additional_footer_y = word['top']
+            if word['text'] in header_texts and not header_found:
+                header_y = word['top']
+                header_found = True
 
-        if header_y is None:
+        if not header_found:
             print(f"Header not found on page {page_num + 1}. Skipping page.")
             continue
 
         if footer_y is None:
-            # If footer not detected, set footer_y to the bottom of the page
+            # If 'Printed' is not found, set footer_y to the bottom of the page
             footer_y = page.height
-            print(f"No footer detected. Setting footer_y to page height: {footer_y}")
+
+        if additional_footer_y is not None:
+            # On the last page, set footer_y to the minimum of existing footer_y and additional_footer_y
+            footer_y = min(footer_y, additional_footer_y)
+            print(f"Additional footer detected at Y-coordinate: {additional_footer_y}")
 
         print(f"Page {page_num + 1}: Header Y-coordinate: {header_y}")
         print(f"Page {page_num + 1}: Footer Y-coordinate: {footer_y}")
@@ -100,34 +91,20 @@ with pdfplumber.open(pdf_path) as pdf:
         # Sort lines by their y-coordinate
         sorted_line_keys = sorted(lines.keys())
 
-        # Group lines into transactions based on the presence of a value in the 'Transaction Date' column
+        # Group lines into transactions
         transactions_data = []
         current_transaction = []
         for line_key in sorted_line_keys:
             line_words = lines[line_key]
-            # Assign words to columns based on x-coordinates
-            line_columns_data = {name: '' for name in column_boundaries.keys()}
-            for word in line_words:
-                assigned_column = None
-                for name, (col_start, col_end) in column_boundaries.items():
-                    if col_start <= word['x0'] < col_end:
-                        assigned_column = name
-                        break
-                if assigned_column:
-                    line_columns_data[assigned_column] += word['text'] + ' '
-            # Debug: Print line_columns_data
-            print(f"Line at y={line_key}: {line_columns_data}")
+            # Check if the line starts with a date
+            line_text = ' '.join([w['text'] for w in line_words])
+            date_match = re.match(date_pattern, line_text.strip())
 
-            transaction_date_text = line_columns_data.get('Transaction Date', '').strip()
-            if transaction_date_text:
-                date_match = re.match(date_pattern, transaction_date_text)
-                if date_match:
-                    # Start of a new transaction
-                    if current_transaction:
-                        transactions_data.append(current_transaction)
-                    current_transaction = [line_words]
-                else:
-                    print(f"Transaction Date '{transaction_date_text}' does not match date pattern. Skipping line.")
+            if date_match:
+                # Start of a new transaction
+                if current_transaction:
+                    transactions_data.append(current_transaction)
+                current_transaction = [line_words]
             else:
                 # Continuation of the current transaction
                 if current_transaction:
@@ -143,8 +120,7 @@ with pdfplumber.open(pdf_path) as pdf:
         print(f"Page {page_num + 1}: Number of transactions detected: {len(transactions_data)}")
 
         # Extract data from transactions
-        for idx, trans in enumerate(transactions_data):
-            print(f"\nProcessing transaction {idx + 1} on page {page_num + 1}")
+        for trans in transactions_data:
             # Initialize fields
             date = ''
             value_date = ''
@@ -152,76 +128,52 @@ with pdfplumber.open(pdf_path) as pdf:
             debit = ''
             credit = ''
 
-            # Process the transaction lines
-            transaction_lines = trans
-            transaction_details_lines = []
+            # Process the first line separately
+            first_line = trans[0]
+            columns_data = {name: '' for name in column_boundaries.keys()}
+            for word in first_line:
+                # Assign word to the appropriate column based on x0
+                assigned_column = None
+                for name, (col_start, col_end) in column_boundaries.items():
+                    if col_start <= word['x0'] < col_end:
+                        assigned_column = name
+                        break
+                if assigned_column:
+                    columns_data[assigned_column] += word['text'] + ' '
 
-            for line in transaction_lines:
-                line_columns_data = {name: '' for name in column_boundaries.keys()}
-                for word in line:
-                    # Assign word to the appropriate column based on x0
-                    assigned_column = None
-                    for name, (col_start, col_end) in column_boundaries.items():
-                        if col_start <= word['x0'] < col_end:
-                            assigned_column = name
-                            break
-                    if assigned_column:
-                        line_columns_data[assigned_column] += word['text'] + ' '
-                # Debug: Print line_columns_data
-                print(f"Line data: {line_columns_data}")
+            # Extract Date and Value Date
+            date_text = columns_data.get('Date', '').strip()
+            value_date_text = columns_data.get('Value Date', '').strip()
 
-                transaction_date_present = False
+            print(f"Extracted Date text: '{date_text}'")
+            print(f"Extracted Value Date text: '{value_date_text}'")
 
-                # Check if the 'Transaction Date' is present in this line
-                date_text = line_columns_data.get('Transaction Date', '').strip()
-                if date_text:
-                    date_match = re.match(date_pattern, date_text)
-                    if date_match:
-                        transaction_date_present = True
-                        if not date:
-                            try:
-                                parsed_date = datetime.strptime(date_text, '%d-%b-%y')  # Adjusted format for two-digit year
-                                date = parsed_date.strftime('%m/%d/%Y')
-                            except ValueError as e:
-                                print(f"Failed to parse Transaction Date '{date_text}': {e}")
-                                pass  # Handle invalid dates if necessary
+            # Parse and reformat dates
+            for date_field, date_str in [('Date', date_text), ('Value Date', value_date_text)]:
+                try:
+                    parsed_date = datetime.strptime(date_str, '%d-%b-%Y')  # Adjust format if needed
+                    formatted_date = parsed_date.strftime('%m/%d/%Y')
+                    if date_field == 'Date':
+                        date = formatted_date
                     else:
-                        print(f"Transaction Date '{date_text}' does not match date pattern.")
+                        value_date = formatted_date
+                except ValueError as e:
+                    print(f"Failed to parse {date_field} '{date_str}': {e}")
+                    pass  # Handle invalid dates if necessary
 
-                # If the 'Value Date' is present and not already set, extract it
-                if transaction_date_present and not value_date:
-                    value_date_text = line_columns_data.get('Value Date', '').strip()
-                    if value_date_text:
-                        try:
-                            parsed_date = datetime.strptime(value_date_text, '%d-%b-%y')  # Adjusted format for two-digit year
-                            value_date = parsed_date.strftime('%m/%d/%Y')
-                        except ValueError as e:
-                            print(f"Failed to parse Value Date '{value_date_text}': {e}")
-                            pass  # Handle invalid dates if necessary
+            # Extract Debit and Credit amounts
+            debit_text = columns_data.get('Debit', '').strip()
+            credit_text = columns_data.get('Credit', '').strip()
 
-                # Only extract 'Withdrawal' and 'Deposit' if 'Transaction Date' is present in this line
-                if transaction_date_present:
-                    # Extract 'Withdrawal' and 'Deposit' amounts from this line
-                    debit_text = line_columns_data.get('Withdrawal', '').strip()
-                    if debit_text:
-                        debit = parse_amount(debit_text)
-                    credit_text = line_columns_data.get('Deposit', '').strip()
-                    if credit_text:
-                        credit = parse_amount(credit_text)
-                else:
-                    # Do not extract 'Withdrawal' or 'Deposit' from lines without 'Transaction Date'
-                    pass
-
-                # Collect 'Transaction Details' from each line
-                details_text = line_columns_data.get('Transaction Details', '').strip()
-                if details_text:
-                    transaction_details_lines.append(details_text)
+            # Clean and convert amounts
+            debit = parse_amount(debit_text)
+            credit = parse_amount(credit_text)
 
             # Ensure debit and credit are strings for empty values
             debit_str = str(debit) if debit != '' else ''
             credit_str = str(credit) if credit != '' else ''
 
-            # Update totals only if amounts are valid
+            # Update totals
             if debit != '':
                 total_debit_transactions += 1
                 total_debit_amount += debit
@@ -229,35 +181,60 @@ with pdfplumber.open(pdf_path) as pdf:
                 total_credit_transactions += 1
                 total_credit_amount += credit
 
+            # Extract 'Transaction Details' from the first line
+            first_line_transaction_details = columns_data.get('Transaction Details', '').strip()
+            transaction_details_lines = []
+            if first_line_transaction_details:
+                transaction_details_lines.append(first_line_transaction_details)
+
+            # Extract 'Transaction Details' from the rest of the lines except the last line
+            lines_to_include = trans[1:-1] if len(trans) > 2 else trans[1:]  # Exclude last line if more than two lines
+
+            for line in lines_to_include:
+                # Get words in the 'Transaction Details' column
+                line_transaction_details = ''
+                for word in line:
+                    assigned_column = None
+                    for name, (col_start, col_end) in column_boundaries.items():
+                        if col_start <= word['x0'] < col_end:
+                            assigned_column = name
+                            break
+                    if assigned_column == 'Transaction Details':
+                        line_transaction_details += word['text'] + ' '
+                if line_transaction_details.strip():  # Only add if there's content
+                    transaction_details_lines.append(line_transaction_details.strip())
+
             # Combine all transaction details lines
-            transaction_details = ' '.join(transaction_details_lines).strip()
-            print(f"Transaction Details collected: '{transaction_details}'")
+            transaction_details = ' '.join(transaction_details_lines)
 
-            # Append to transactions list
-            transaction_record = {
-                'Transaction Date': date if date else '',
-                'Value Date': value_date if value_date else '',
-                'Transaction Details': transaction_details if transaction_details else '',
-                'Withdrawal': debit_str,
-                'Deposit': credit_str
-            }
-            transactions.append(transaction_record)
-            print(f"Appended transaction: {transaction_record}")
+            # Append to transactions list if Date is present
+            if date:
+                transaction_record = {
+                    'Date': date if date != '' else '',
+                    'Value Date': value_date if value_date != '' else '',
+                    'Transaction Details': transaction_details if transaction_details != '' else '',
+                    'Debit': debit_str,
+                    'Credit': credit_str
+                }
+                transactions.append(transaction_record)
+                print(f"Appended transaction: {transaction_record}")
+            else:
+                print("Transaction skipped due to missing date.")
 
-    # Check if transactions list is not empty
-    if transactions:
-        # Export to CSV
-        df = pd.DataFrame(transactions)
-        # Ensure empty fields are represented as empty strings
-        df.fillna('', inplace=True)
-        df.to_csv(csv_filename, index=False)
-        print(f"\nTransactions have been successfully extracted and saved to '{csv_filename}'.")
-    else:
-        print("\nNo transactions were extracted. Please check the debug output for issues.")
+# Check if transactions list is not empty
+if transactions:
+    # Export to CSV
+    df = pd.DataFrame(transactions)
+    # Ensure empty fields are represented as empty strings
+    df.fillna('', inplace=True)
+    df.to_csv(csv_filename, index=False)
+    print(f"\nTransactions have been successfully extracted and saved to '{csv_filename}'.")
+else:
+    print("\nNo transactions were extracted. Please check the debug output for issues.")
 
-    # Print summary
-    print("\nSummary:")
-    print(f"Total number of debit transactions: {total_debit_transactions}")
-    print(f"Total number of credit transactions: {total_credit_transactions}")
-    print(f"Total debit amount: {total_debit_amount}")
-    print(f"Total credit amount: {total_credit_amount}")
+# Print summary
+print("\nSummary:")
+print(f"Total number of debit transactions: {total_debit_transactions}")
+print(f"Total number of credit transactions: {total_credit_transactions}")
+print(f"Total debit amount: {total_debit_amount}")
+print(f"Total credit amount: {total_credit_amount}")
